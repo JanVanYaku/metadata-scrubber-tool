@@ -184,6 +184,69 @@ def get_ffmpeg_path() -> str:
     )
 
 
+def supported_dialog_filetypes() -> list[tuple[str, str]]:
+    """Build file-picker filters for supported media files."""
+
+    patterns = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_EXTENSIONS))
+    return [
+        ("Supported image/audio/video files", patterns),
+        ("Image files", " ".join(f"*{suffix}" for suffix in sorted(IMAGE_EXTENSIONS))),
+        ("Audio files", " ".join(f"*{suffix}" for suffix in sorted(AUDIO_EXTENSIONS))),
+        ("Video files", " ".join(f"*{suffix}" for suffix in sorted(VIDEO_EXTENSIONS))),
+        ("All files", "*.*"),
+    ]
+
+
+def select_path_with_dialog(title: str, allow_folder: bool) -> Path | None:
+    """Open a Windows file/folder picker and fall back to console input."""
+
+    try:
+        from tkinter import Tk, filedialog
+
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = (
+            filedialog.askdirectory(title=title)
+            if allow_folder
+            else filedialog.askopenfilename(
+                title=title,
+                filetypes=supported_dialog_filetypes(),
+            )
+        )
+        root.destroy()
+
+        if selected:
+            return Path(selected)
+    except Exception as exc:
+        console.print(f"[yellow]File picker unavailable: {exc}[/yellow]")
+
+    entered = console.input(f"{title} - enter full path, or press Enter to cancel: ")
+    if not entered.strip():
+        return None
+    return Path(entered.strip().strip('"'))
+
+
+def resolve_input_path(
+    provided_path: Path | None,
+    purpose: str,
+    allow_folder: bool,
+) -> Path | None:
+    """Use the given path, or prompt the user to pick one interactively."""
+
+    if provided_path:
+        return provided_path.resolve()
+
+    selected = select_path_with_dialog(
+        title=f"Select file to {purpose}" if not allow_folder else f"Select folder to {purpose}",
+        allow_folder=allow_folder,
+    )
+    if not selected:
+        console.print("[yellow]No file selected. Cancelled.[/yellow]")
+        return None
+    return selected.resolve()
+
+
 def inspect_image_metadata(path: Path) -> dict[str, str]:
     """Read common EXIF and container metadata from an image file."""
 
@@ -473,7 +536,10 @@ def print_reports_table(title: str, reports: list[FileReport]) -> None:
 def command_inspect(args: argparse.Namespace) -> int:
     """Inspect files and show metadata that could reveal private information."""
 
-    input_path = args.path.resolve()
+    input_path = resolve_input_path(args.path, "inspect", args.recursive)
+    if not input_path:
+        return 1
+
     files = list(iter_supported_files(input_path, args.recursive))
     if not files:
         console.print("[yellow]No supported image, audio, or video files found.[/yellow]")
@@ -525,7 +591,10 @@ def command_inspect(args: argparse.Namespace) -> int:
 def command_scrub(args: argparse.Namespace) -> int:
     """Scrub metadata from one file or a batch of files."""
 
-    input_path = args.path.resolve()
+    input_path = resolve_input_path(args.path, "scrub", args.recursive)
+    if not input_path:
+        return 1
+
     if args.output and input_path.is_dir():
         console.print("[red]--output can only be used with one input file.[/red]")
         return 1
@@ -687,7 +756,12 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser = subparsers.add_parser(
         "inspect", help="Show metadata fields found in a file or folder."
     )
-    inspect_parser.add_argument("path", type=Path, help="File or folder to inspect.")
+    inspect_parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        help="File or folder to inspect. If omitted, a file picker opens.",
+    )
     inspect_parser.add_argument(
         "--recursive", action="store_true", help="Scan folders recursively."
     )
@@ -702,7 +776,12 @@ def build_parser() -> argparse.ArgumentParser:
     scrub_parser = subparsers.add_parser(
         "scrub", help="Remove metadata from a file or supported files in a folder."
     )
-    scrub_parser.add_argument("path", type=Path, help="File or folder to scrub.")
+    scrub_parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        help="File or folder to scrub. If omitted, a file picker opens.",
+    )
     scrub_parser.add_argument(
         "--output", type=Path, help="Output path for one input file."
     )

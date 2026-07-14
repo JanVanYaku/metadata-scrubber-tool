@@ -39,40 +39,40 @@ python -m pip install -r requirements.txt
 
 ## Usage
 
-Inspect one file:
+Inspect one file with the file picker:
 
 ```powershell
-python .\metadata_scrubber.py inspect .\photo.jpg --details
+python .\metadata_scrubber.py inspect --details
 ```
 
-Preview a scrub without writing output:
+Preview a scrub without writing output. The app will prompt you to select the file:
 
 ```powershell
-python .\metadata_scrubber.py scrub .\photo.jpg --dry-run
+python .\metadata_scrubber.py scrub --dry-run
 ```
 
-Scrub one file and verify the result:
+Scrub one selected file and verify the result:
 
 ```powershell
-python .\metadata_scrubber.py scrub .\photo.jpg --verify
+python .\metadata_scrubber.py scrub --verify
 ```
 
-Scrub a video to a specific output path:
+You can still pass a path manually when you want:
 
 ```powershell
 python .\metadata_scrubber.py scrub .\video.mp4 --output .\video_clean.mp4 --verify
 ```
 
-Scrub a folder recursively:
+Scrub a selected folder recursively. With `--recursive`, the app opens a folder picker:
 
 ```powershell
-python .\metadata_scrubber.py scrub .\media_folder --recursive --output-dir .\scrubbed --verify
+python .\metadata_scrubber.py scrub --recursive --output-dir .\scrubbed --verify
 ```
 
 Save an audit report:
 
 ```powershell
-python .\metadata_scrubber.py scrub .\media_folder --recursive --output-dir .\scrubbed --verify --report .\scrub_report.json
+python .\metadata_scrubber.py scrub --recursive --output-dir .\scrubbed --verify --report .\scrub_report.json
 ```
 
 Compare an original file with a scrubbed file:
