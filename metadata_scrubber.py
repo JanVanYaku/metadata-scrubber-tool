@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -76,6 +77,8 @@ class FileReport:
     error: str | None = None
     metadata_before: dict[str, str] = field(default_factory=dict)
     metadata_after: dict[str, str] = field(default_factory=dict)
+    technical_before: dict[str, str] = field(default_factory=dict)
+    technical_after: dict[str, str] = field(default_factory=dict)
 
 
 def shorten(value: object, limit: int = 180) -> str:
@@ -121,6 +124,94 @@ def filtered_metadata_count(metadata: dict[str, str]) -> int:
         for key, value in metadata.items()
         if not is_generated_ffmpeg_field(key, value)
     )
+
+
+def is_low_value_technical_field(key: str, value: str) -> bool:
+    """Separate normal container fields from metadata that can identify someone."""
+
+    lower_key = key.lower()
+
+    technical_keys = (
+        "info:jfif",
+        "info:jfif_version",
+        "info:jfif_unit",
+        "info:jfif_density",
+        "info:dpi",
+        "info:exif",
+        "info:icc_profile",
+        "exif:exifoffset",
+        "container:encoder",
+        "stream_#",
+    )
+    if lower_key.startswith(technical_keys):
+        return True
+
+    return is_generated_ffmpeg_field(key, value)
+
+
+def split_metadata_fields(
+    metadata: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return scrubbable/private fields separately from technical fields."""
+
+    private_fields: dict[str, str] = {}
+    technical_fields: dict[str, str] = {}
+
+    for key, value in metadata.items():
+        if is_low_value_technical_field(key, value):
+            technical_fields[f"Metadata:{key}"] = value
+        else:
+            private_fields[key] = value
+
+    return private_fields, technical_fields
+
+
+def human_size(size_bytes: int) -> str:
+    """Format bytes as a readable file size."""
+
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(size_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+
+    return f"{size_bytes} B"
+
+
+def format_timestamp(timestamp: float) -> str:
+    """Format filesystem timestamps in local time."""
+
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_seconds(seconds: float | int | None) -> str:
+    """Format media duration values."""
+
+    if seconds is None:
+        return "unknown"
+
+    total = int(round(float(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def file_system_details(path: Path) -> dict[str, str]:
+    """Collect useful filesystem details that do not live inside the media."""
+
+    stat = path.stat()
+    return {
+        "File:name": path.name,
+        "File:path": str(path),
+        "File:extension": path.suffix.lower() or "none",
+        "File:size": f"{human_size(stat.st_size)} ({stat.st_size} bytes)",
+        "File:created": format_timestamp(stat.st_ctime),
+        "File:modified": format_timestamp(stat.st_mtime),
+        "File:accessed": format_timestamp(stat.st_atime),
+    }
 
 
 def read_signature(path: Path, size: int = 32) -> bytes:
@@ -337,6 +428,102 @@ def inspect_media_metadata(path: Path) -> dict[str, str]:
     return metadata
 
 
+def inspect_image_technical_details(path: Path) -> dict[str, str]:
+    """Collect useful image details even when no private EXIF exists."""
+
+    from PIL import Image
+
+    details: dict[str, str] = {}
+    with Image.open(path) as image:
+        width, height = image.size
+        put_unique(details, "Image:format", image.format or "unknown")
+        put_unique(details, "Image:dimensions", f"{width} x {height} pixels")
+        put_unique(details, "Image:megapixels", f"{(width * height) / 1_000_000:.2f}")
+        put_unique(details, "Image:color_mode", image.mode)
+        put_unique(details, "Image:frames", getattr(image, "n_frames", 1))
+        put_unique(details, "Image:animated", getattr(image, "is_animated", False))
+
+        if "dpi" in image.info:
+            put_unique(details, "Image:dpi", image.info["dpi"])
+        if "icc_profile" in image.info:
+            put_unique(details, "Image:icc_profile", f"{len(image.info['icc_profile'])} bytes")
+        if "transparency" in image.info:
+            put_unique(details, "Image:transparency", "present")
+
+    return details
+
+
+def ffmpeg_probe_output(path: Path) -> str:
+    """Return FFmpeg probe text for media files."""
+
+    ffmpeg = get_ffmpeg_path()
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stderr
+
+
+def parse_ffmpeg_technical_details(stderr: str) -> dict[str, str]:
+    """Extract duration, bitrate, and stream summaries from FFmpeg output."""
+
+    details: dict[str, str] = {}
+    stream_number = 1
+
+    for raw_line in stderr.splitlines():
+        stripped = raw_line.strip()
+
+        if stripped.startswith("Duration:"):
+            duration_match = re.search(r"Duration:\s*([^,]+)", stripped)
+            start_match = re.search(r"start:\s*([^,]+)", stripped)
+            bitrate_match = re.search(r"bitrate:\s*([^,]+)", stripped)
+
+            if duration_match:
+                put_unique(details, "Media:duration", duration_match.group(1))
+            if start_match:
+                put_unique(details, "Media:start", start_match.group(1))
+            if bitrate_match:
+                put_unique(details, "Media:bitrate", bitrate_match.group(1))
+
+        if stripped.startswith("Stream #"):
+            put_unique(details, f"Media:stream_{stream_number}", stripped)
+            stream_number += 1
+
+    return details
+
+
+def inspect_media_technical_details(path: Path) -> dict[str, str]:
+    """Collect audio/video technical details and stream summaries."""
+
+    details: dict[str, str] = {}
+
+    try:
+        import mutagen
+
+        media = mutagen.File(path)
+        if media and media.info:
+            info = media.info
+            if hasattr(info, "length"):
+                put_unique(details, "Media:duration", format_seconds(info.length))
+            if hasattr(info, "bitrate") and info.bitrate:
+                put_unique(details, "Media:bitrate", f"{int(info.bitrate / 1000)} kb/s")
+            if hasattr(info, "sample_rate") and info.sample_rate:
+                put_unique(details, "Audio:sample_rate", f"{info.sample_rate} Hz")
+            if hasattr(info, "channels") and info.channels:
+                put_unique(details, "Audio:channels", info.channels)
+            if hasattr(info, "bits_per_sample") and info.bits_per_sample:
+                put_unique(details, "Audio:bits_per_sample", info.bits_per_sample)
+    except Exception as exc:
+        put_unique(details, "Media:mutagen_info_error", exc)
+
+    for key, value in parse_ffmpeg_technical_details(ffmpeg_probe_output(path)).items():
+        put_unique(details, key, value)
+
+    return details
+
+
 def inspect_metadata(path: Path) -> tuple[str, dict[str, str]]:
     """Return the detected file kind and metadata fields."""
 
@@ -346,6 +533,22 @@ def inspect_metadata(path: Path) -> tuple[str, dict[str, str]]:
     if kind in {"audio", "video"}:
         return kind, inspect_media_metadata(path)
     return kind, {}
+
+
+def inspect_file(path: Path) -> tuple[str, dict[str, str], dict[str, str]]:
+    """Return detected kind, private metadata, and technical details."""
+
+    kind, raw_metadata = inspect_metadata(path)
+    private_metadata, technical_metadata = split_metadata_fields(raw_metadata)
+    technical_details = file_system_details(path)
+
+    if kind == "image":
+        technical_details.update(inspect_image_technical_details(path))
+    elif kind in {"audio", "video"}:
+        technical_details.update(inspect_media_technical_details(path))
+
+    technical_details.update(technical_metadata)
+    return kind, private_metadata, technical_details
 
 
 def image_format_for_output(source: Path, output: Path, original_format: str | None) -> str:
@@ -533,6 +736,42 @@ def print_reports_table(title: str, reports: list[FileReport]) -> None:
     console.print(table)
 
 
+def print_key_value_table(title: str, values: dict[str, str]) -> None:
+    """Render a compact key/value detail table."""
+
+    table = Table(title=title, show_lines=False)
+    table.add_column("Field", style="cyan", overflow="fold")
+    table.add_column("Value", overflow="fold")
+
+    if not values:
+        table.add_row("-", "No fields found")
+    else:
+        for key, value in values.items():
+            table.add_row(key, value)
+
+    console.print(table)
+
+
+def print_report_details(report: FileReport) -> None:
+    """Print full details for a report entry."""
+
+    console.print(Panel.fit(report.source, title=f"{report.kind.title()} Details"))
+    technical_title = "Technical Details Before" if report.output else "Technical Details"
+    metadata_title = (
+        "Private / Scrubbable Metadata Before"
+        if report.output
+        else "Private / Scrubbable Metadata"
+    )
+    print_key_value_table(technical_title, report.technical_before)
+    print_key_value_table(metadata_title, report.metadata_before)
+
+    if report.output:
+        console.print(Panel.fit(report.output, title="Output File"))
+        if report.technical_after or report.metadata_after:
+            print_key_value_table("Technical Details After", report.technical_after)
+            print_key_value_table("Private / Scrubbable Metadata After", report.metadata_after)
+
+
 def command_inspect(args: argparse.Namespace) -> int:
     """Inspect files and show metadata that could reveal private information."""
 
@@ -548,15 +787,19 @@ def command_inspect(args: argparse.Namespace) -> int:
     reports: list[FileReport] = []
     for file_path in files:
         try:
-            kind, metadata = inspect_metadata(file_path)
+            kind, metadata, technical_details = inspect_file(file_path)
+            status = render_metadata_preview(metadata)
+            if not metadata:
+                status = "No private metadata found; see technical details"
             reports.append(
                 FileReport(
                     source=str(file_path),
                     kind=kind,
                     action="inspect",
-                    status=render_metadata_preview(metadata),
-                    metadata_before_count=filtered_metadata_count(metadata),
+                    status=status,
+                    metadata_before_count=len(metadata),
                     metadata_before=metadata,
+                    technical_before=technical_details,
                 )
             )
         except Exception as exc:
@@ -575,11 +818,7 @@ def command_inspect(args: argparse.Namespace) -> int:
 
     if args.details:
         for report in reports:
-            if not report.metadata_before:
-                continue
-            console.print(Panel.fit(report.source, title="Details"))
-            for key, value in report.metadata_before.items():
-                console.print(f"[cyan]{key}[/cyan]: {value}")
+            print_report_details(report)
 
     if args.report:
         write_json_report(args.report.resolve(), reports)
@@ -611,7 +850,7 @@ def command_scrub(args: argparse.Namespace) -> int:
 
     for file_path in files:
         try:
-            kind, metadata_before = inspect_metadata(file_path)
+            kind, metadata_before, technical_before = inspect_file(file_path)
             output_path = choose_output_path(
                 source=file_path,
                 input_root=input_root,
@@ -629,9 +868,10 @@ def command_scrub(args: argparse.Namespace) -> int:
                         kind=kind,
                         action="dry-run",
                         status="would scrub",
-                        metadata_before_count=filtered_metadata_count(metadata_before),
+                        metadata_before_count=len(metadata_before),
                         output=str(output_path),
                         metadata_before=metadata_before,
+                        technical_before=technical_before,
                     )
                 )
                 continue
@@ -650,14 +890,18 @@ def command_scrub(args: argparse.Namespace) -> int:
                 raise RuntimeError("Unsupported file type")
 
             metadata_after: dict[str, str] = {}
+            technical_after: dict[str, str] = {}
             after_count: int | None = None
             if args.verify:
-                _, metadata_after = inspect_metadata(output_path)
-                after_count = filtered_metadata_count(metadata_after)
+                _, metadata_after, technical_after = inspect_file(output_path)
+                after_count = len(metadata_after)
 
             status = "scrubbed"
-            if after_count:
-                status = f"scrubbed, verify found {after_count} field(s)"
+            if after_count is not None:
+                removed_count = max(len(metadata_before) - after_count, 0)
+                status = f"scrubbed; removed {removed_count} field(s)"
+                if after_count:
+                    status += f"; {after_count} remain"
 
             reports.append(
                 FileReport(
@@ -665,11 +909,13 @@ def command_scrub(args: argparse.Namespace) -> int:
                     kind=kind,
                     action="scrub",
                     status=status,
-                    metadata_before_count=filtered_metadata_count(metadata_before),
+                    metadata_before_count=len(metadata_before),
                     metadata_after_count=after_count,
                     output=str(output_path),
                     metadata_before=metadata_before,
                     metadata_after=metadata_after,
+                    technical_before=technical_before,
+                    technical_after=technical_after,
                 )
             )
         except Exception as exc:
@@ -690,6 +936,10 @@ def command_scrub(args: argparse.Namespace) -> int:
         write_json_report(args.report.resolve(), reports)
         console.print(f"[green]Report saved to {args.report.resolve()}[/green]")
 
+    if args.details:
+        for report in reports:
+            print_report_details(report)
+
     failures = [report for report in reports if report.status == "failed"]
     return 2 if failures else 0
 
@@ -700,11 +950,11 @@ def command_verify(args: argparse.Namespace) -> int:
     original = args.original.resolve()
     scrubbed = args.scrubbed.resolve()
 
-    original_kind, original_metadata = inspect_metadata(original)
-    scrubbed_kind, scrubbed_metadata = inspect_metadata(scrubbed)
+    original_kind, original_metadata, original_technical = inspect_file(original)
+    scrubbed_kind, scrubbed_metadata, scrubbed_technical = inspect_file(scrubbed)
 
-    original_count = filtered_metadata_count(original_metadata)
-    scrubbed_count = filtered_metadata_count(scrubbed_metadata)
+    original_count = len(original_metadata)
+    scrubbed_count = len(scrubbed_metadata)
     removed = max(original_count - scrubbed_count, 0)
 
     reports = [
@@ -715,6 +965,7 @@ def command_verify(args: argparse.Namespace) -> int:
             status=render_metadata_preview(original_metadata),
             metadata_before_count=original_count,
             metadata_before=original_metadata,
+            technical_before=original_technical,
         ),
         FileReport(
             source=str(scrubbed),
@@ -723,20 +974,15 @@ def command_verify(args: argparse.Namespace) -> int:
             status=f"{removed} field(s) removed compared with original",
             metadata_before_count=scrubbed_count,
             metadata_before=scrubbed_metadata,
+            technical_before=scrubbed_technical,
         ),
     ]
 
     print_reports_table("Metadata Verification", reports)
 
-    remaining_fields = [
-        (key, value)
-        for key, value in scrubbed_metadata.items()
-        if not is_generated_ffmpeg_field(key, value)
-    ]
-    if args.details and remaining_fields:
-        console.print(Panel.fit(str(scrubbed), title="Remaining Fields"))
-        for key, value in remaining_fields:
-            console.print(f"[cyan]{key}[/cyan]: {value}")
+    if args.details:
+        for report in reports:
+            print_report_details(report)
 
     if args.report:
         write_json_report(args.report.resolve(), reports)
@@ -800,7 +1046,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Preview what would be scrubbed."
     )
     scrub_parser.add_argument(
-        "--verify", action="store_true", help="Inspect output files after scrubbing."
+        "--verify",
+        dest="verify",
+        action="store_true",
+        default=True,
+        help="Inspect output files after scrubbing. This is enabled by default.",
+    )
+    scrub_parser.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="Skip after-scrub verification.",
+    )
+    scrub_parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Print technical details and private metadata before and after.",
     )
     scrub_parser.add_argument(
         "--drop-subtitles",

@@ -18,7 +18,8 @@ The app can remove common fields such as GPS coordinates, camera/device data, ti
 - Scrub images by re-saving pixels without EXIF, GPS, ICC, or text chunks.
 - Scrub audio and video with FFmpeg stream-copy mode so quality is preserved.
 - Dry-run mode to preview what would be removed.
-- Verification mode to compare before and after metadata counts.
+- Verification runs by default after scrubbing and compares before/after metadata counts.
+- Detailed reports split private/scrubbable metadata from normal technical file details.
 - Batch mode for folders, with optional recursive scanning.
 - JSON reports for audit logs.
 - File signature detection plus extension matching.
@@ -54,25 +55,31 @@ python .\metadata_scrubber.py scrub --dry-run
 Scrub one selected file and verify the result:
 
 ```powershell
-python .\metadata_scrubber.py scrub --verify
+python .\metadata_scrubber.py scrub
+```
+
+Scrub one selected file and show full details:
+
+```powershell
+python .\metadata_scrubber.py scrub --details
 ```
 
 You can still pass a path manually when you want:
 
 ```powershell
-python .\metadata_scrubber.py scrub .\video.mp4 --output .\video_clean.mp4 --verify
+python .\metadata_scrubber.py scrub .\video.mp4 --output .\video_clean.mp4 --details
 ```
 
 Scrub a selected folder recursively. With `--recursive`, the app opens a folder picker:
 
 ```powershell
-python .\metadata_scrubber.py scrub --recursive --output-dir .\scrubbed --verify
+python .\metadata_scrubber.py scrub --recursive --output-dir .\scrubbed --details
 ```
 
 Save an audit report:
 
 ```powershell
-python .\metadata_scrubber.py scrub --recursive --output-dir .\scrubbed --verify --report .\scrub_report.json
+python .\metadata_scrubber.py scrub --recursive --output-dir .\scrubbed --details --report .\scrub_report.json
 ```
 
 Compare an original file with a scrubbed file:
