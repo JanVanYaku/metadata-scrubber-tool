@@ -1,0 +1,10 @@
+#######################################################################
+# Author: Lehlohonolo Adolf Matobakele  
+# Email: lehlohonolo.matobakele@gov.ls
+# Contacxt: 00266 62320704
+#######################################################################
+
+Pillow>=11.0.0
+mutagen>=1.47.0
+rich>=13.7.0
+imageio-ffmpeg>=0.5.1
