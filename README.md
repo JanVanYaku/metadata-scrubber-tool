@@ -12,6 +12,10 @@ A Python command-line privacy tool that inspects and scrubs useful metadata from
 
 The app can remove common fields such as GPS coordinates, camera/device data, timestamps, creator names, software traces, title/artist/album tags, comments, embedded cover art, chapters, and container metadata.
 
+## Screenshot
+
+![Demo screenshot](assets/demo.svg)
+
 ## Features
 
 - Inspect images, audio files, and video files for metadata.
